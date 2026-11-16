@@ -71,7 +71,7 @@ local PATTERNS = {
 }
 
 local CHROMA_MIN = 40       -- below this (0-255), a pixel counts as neutral (text, axes, background)
-local RENDER_SCALE = 1.5    -- render at 1.5x screen width so you can zoom into the chart
+local RENDER_SCALE = 1.5    -- render at 1.5x the reader's zoom so you can zoom into the chart
 local MAX_PIXELS = 8000000  -- safety cap (~32 MB for the RGB render)
 
 local function bandOf(h)
@@ -488,19 +488,44 @@ function HueLens:addToMainMenu(menu_items)
     }
 end
 
--- Momentarily switch MuPDF to RGB, render the page, switch back.
-function HueLens:renderPageRGB(pageno)
+-- The page region the reader currently shows, in page coordinates at `zoom`.
+-- In scroll mode, the page taking most of the screen. Reflowed pages don't map
+-- to native coordinates, so those get the whole page.
+function HueLens:getViewArea()
+    local view = self.ui.view
+    local doc = self.ui.document
+    local state, area = view.state, view.visible_area
+    if view.page_scroll then
+        state = nil
+        for __, st in ipairs(view.page_states or {}) do
+            if not state or st.visible_area.h > state.visible_area.h then state = st end
+        end
+        area = state and state.visible_area
+    end
+    if state and area and area.w > 0 and doc.configurable.text_wrap ~= 1 then
+        return state.page, state.zoom, area.x, area.y, area.w, area.h
+    end
+    local pageno = self.ui:getCurrentPage()
+    local dims = doc:getNativePageDimensions(pageno)
+    local zoom = Screen:getWidth() / dims.w
+    return pageno, zoom, 0, 0, dims.w * zoom, dims.h * zoom
+end
+
+-- Momentarily switch MuPDF to RGB, render what the reader shows, switch back.
+function HueLens:renderViewRGB()
     local doc = self.ui.document
     local mudoc = doc._document
     if not (mudoc and mudoc.setColorRendering and mudoc.openPage) then
         return nil, _("This document type doesn't support color rendering.")
     end
-    local dims = doc:getNativePageDimensions(pageno)
-    local zoom = Screen:getWidth() * RENDER_SCALE / dims.w
-    if dims.w * dims.h * zoom * zoom > MAX_PIXELS then
-        zoom = math.sqrt(MAX_PIXELS / (dims.w * dims.h))
+    local pageno, zoom, x, y, w, h = self:getViewArea()
+    local scale = RENDER_SCALE
+    if w * h * scale * scale > MAX_PIXELS then
+        scale = math.sqrt(MAX_PIXELS / (w * h))
     end
-    local w, h = math.floor(dims.w * zoom), math.floor(dims.h * zoom)
+    zoom = zoom * scale
+    x, y = math.floor(x * scale), math.floor(y * scale)
+    w, h = math.floor(w * scale), math.floor(h * scale)
     local dc = DrawContext.new()
     dc:setZoom(zoom)
 
@@ -508,7 +533,7 @@ function HueLens:renderPageRGB(pageno)
     mudoc:setColorRendering(true)
     local ok, bb = pcall(function()
         local page = mudoc:openPage(pageno)
-        local out = page:draw_new(dc, w, h, 0, 0)
+        local out = page:draw_new(dc, w, h, x, y)
         page:close()
         return out
     end)
@@ -538,7 +563,7 @@ function HueLens:show()
     UIManager:show(msg)
     UIManager:forceRePaint()
 
-    local src, err = self:renderPageRGB(self.ui:getCurrentPage())
+    local src, err = self:renderViewRGB()
     UIManager:close(msg)
     if not src then
         UIManager:show(InfoMessage:new{ text = err })

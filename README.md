@@ -17,8 +17,9 @@ in an image viewer.
   neutral content (text, axes) faded. Only bands present on the page are offered,
   sorted by area.
 
-Switch modes with the selector at the bottom of the viewer. Pinch/pan to zoom; the page
-is rendered at 1.5x screen width.
+Switch modes with the selector at the bottom of the viewer. The viewer shows the part of
+the page currently on screen, keeping the reader's zoom, rendered at 1.5x for extra
+detail; pinch/pan to zoom further. Reflowed pages fall back to the whole page.
 
 ## Installation
 
