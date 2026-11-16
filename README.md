@@ -1,0 +1,50 @@
+# HueLens
+
+KOReader plugin that temporarily re-renders the current PDF page in color and maps
+colors to distinguishable grays, or isolates one color at a time. Useful for reading
+charts on grayscale e-ink screens.
+
+The normal page rendering is never modified: the color render is momentary and shown
+in an image viewer.
+
+## Modes
+
+- **All**: every hue band (red, orange, yellow, green, cyan, blue, purple, magenta) is
+  mapped to a different gray level, with neighbouring hues getting distant grays.
+- **Single color**: one hue band is shown in black, other colors in light gray and
+  neutral content (text, axes) faded. Only bands present on the page are offered,
+  sorted by area.
+
+Switch modes with the selector at the bottom of the viewer. Pinch/pan to zoom; the page
+is rendered at 1.5x screen width.
+
+## Installation
+
+1. Download `huelens.koplugin-<version>.zip` from the
+   [releases page](https://github.com/jaeusamio/huelens.koplugin/releases).
+2. Extract it into KOReader's `plugins/` directory, so you end up with
+   `plugins/huelens.koplugin/main.lua`.
+3. Restart KOReader.
+
+## Usage
+
+With a paged document (PDF, CBZ, ...) open, use any of:
+
+- Bottom panel, contrast tab: **Color separation -> show**
+- Main menu, Tools: **Color separation of current page**
+- Gestures / profiles: action **Color separation of current page**
+
+Requires a document backend that supports color rendering (MuPDF).
+
+## Releasing
+
+Push a `v*` tag pointing to a commit on `main`:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The `Release` workflow packages `_meta.lua` and `main.lua` into
+`huelens.koplugin-<tag>.zip` and creates a GitHub release whose notes list the commits
+since the previous tag.

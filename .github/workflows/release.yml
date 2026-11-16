@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tag is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Build changelog
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          range=${prev:+$prev..}$GITHUB_REF_NAME
+          git log --no-merges --pretty='- %s (%h)' "$range" > CHANGELOG.md
+          cat CHANGELOG.md
+
+      - name: Package plugin
+        run: |
+          mkdir -p dist/huelens.koplugin
+          cp _meta.lua main.lua dist/huelens.koplugin/
+          cd dist && zip -r "huelens.koplugin-${GITHUB_REF_NAME}.zip" huelens.koplugin
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/huelens.koplugin-${GITHUB_REF_NAME}.zip" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file CHANGELOG.md
