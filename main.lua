@@ -3,9 +3,9 @@ Color separation plugin for KOReader.
 
 Re-renders the current page of a paged document (PDF, CBZ…) in RGB, even on
 a grayscale device, then shows it in the image viewer through several modes:
-  1. every hue band present mapped to a distinct gray and fill pattern, with a legend
-  2+. one hue band present on the page shown black, everything else faded
-      (picked from a selector at the bottom; empty bands are skipped)
+  1. every distinct color present mapped to a distinct gray and fill pattern, with a legend
+  2+. one color present on the page shown black, everything else faded
+      (picked from a selector at the bottom)
 
 Normal page rendering is never modified: the color render is momentary.
 
@@ -44,7 +44,7 @@ local _ = require("gettext")
 local Screen = Device.screen
 local band, bor, lshift, rshift = bit.band, bit.bor, bit.lshift, bit.rshift
 
--- Hue bands in degrees, in hue order (the "all colors" mode relies on it).
+-- Hue bands in degrees, used to name the colors found.
 local BANDS = {
     { name = _("Red"),     from = 345, to = 15  },
     { name = _("Orange"),  from = 15,  to = 45  },
@@ -71,6 +71,8 @@ local PATTERNS = {
 }
 
 local CHROMA_MIN = 40       -- below this (0-255), a pixel counts as neutral (text, axes, background)
+local MERGE_DIST = 10       -- RGB distance under which two colors count as the same series
+local ASSIGN_DIST = 60      -- colors farther than this from every series are left as context
 local RENDER_SCALE = 1.5    -- render at 1.5x the reader's zoom so you can zoom into the chart
 local MAX_PIXELS = 8000000  -- safety cap (~32 MB for the RGB render)
 
@@ -106,44 +108,52 @@ end
 -- Per-color classification indexed by 6-bit-per-channel RGB (64^3 = 262144 entries),
 -- built once and shared by every mode's LUT and by the color census.
 local LUT_SIZE = 262144
-local base_lum, base_chroma, base_band
+local base_lum, base_chroma
 local function buildBase()
     if base_lum then return end
     base_lum = ffi.new("uint8_t[?]", LUT_SIZE)
     base_chroma = ffi.new("uint8_t[?]", LUT_SIZE)
-    base_band = ffi.new("uint8_t[?]", LUT_SIZE)
     for ri = 0, 63 do
         for gi = 0, 63 do
             for bi = 0, 63 do
                 local i = bor(lshift(ri, 12), lshift(gi, 6), bi)
-                local lum, chroma, bnd = classify(ri * 4 + 2, gi * 4 + 2, bi * 4 + 2)
+                local lum, chroma = classify(ri * 4 + 2, gi * 4 + 2, bi * 4 + 2)
                 base_lum[i] = math.floor(lum + 0.5)
                 base_chroma[i] = chroma
-                base_band[i] = bnd or 0
             end
         end
     end
 end
 
--- Isolate BANDS[mode].
-local lut_cache = {}
-local function getLut(mode)
-    if lut_cache[mode] then return lut_cache[mode] end
+local function rgbOf(i)
+    return rshift(i, 12) * 4 + 2, band(rshift(i, 6), 63) * 4 + 2, band(i, 63) * 4 + 2
+end
+
+local function nearest(colors, r, g, b)
+    local best, best_d = nil, math.huge
+    for k, c in ipairs(colors) do
+        local dr, dg, db = c.r - r, c.g - g, c.b - b
+        local d = dr * dr + dg * dg + db * db
+        if d < best_d then best, best_d = k, d end
+    end
+    return best, best_d
+end
+
+-- Isolate found[id].
+local function isolateLut(assign, id)
     buildBase()
     local lut = ffi.new("uint8_t[?]", LUT_SIZE)
     for i = 0, LUT_SIZE - 1 do
-        local lum, chroma, bnd = base_lum[i], base_chroma[i], base_band[i]
         local out
-        if chroma >= CHROMA_MIN and bnd == mode then
-            out = 0             -- selected color: black
-        elseif chroma >= CHROMA_MIN then
-            out = 215           -- other colors: light gray
+        if base_chroma[i] < CHROMA_MIN then
+            out = 120 + base_lum[i] / 2 -- neutral context: faded but visible
+        elseif assign[i] == id then
+            out = 0                     -- selected color: black
         else
-            out = 120 + lum / 2 -- neutral context: faded but visible
+            out = 215                   -- other colors: light gray
         end
         lut[i] = math.floor(out + 0.5)
     end
-    lut_cache[mode] = lut
     return lut
 end
 
@@ -153,47 +163,45 @@ local function rgbIndex(p, bgr)
     return bor(lshift(rshift(r, 2), 12), lshift(rshift(p.g, 2), 6), rshift(b, 2))
 end
 
--- "All colors" mode for the bands found on this page: their grays are spread over
--- the whole usable range, interleaved so hue neighbours get distant grays, and each
--- band gets a fill pattern. Sets f.gray, f.off and f.pattern on each found entry.
+-- "All colors" mode: grays spread over the whole usable range in the colors'
+-- original lightness order (so sequential scales stay ordered), and each color
+-- gets a fill pattern. Sets f.gray, f.off and f.pattern on each found entry.
 -- Pattern pixels use `on`, gaps use `off` (a lighter gray, so thin lines survive).
-local function buildAllMode(found)
+local function buildAllMode(found, assign)
     buildBase()
     local order = {}
     for i, f in ipairs(found) do order[i] = f end
-    table.sort(order, function(a, b) return a.band < b.band end)
+    table.sort(order, function(a, b) return a.lum < b.lum end)
     local n = #order
     local on_g, off_g = {}, {}
-    local tiles = ffi.new("uint16_t[?]", (#BANDS + 1) * TILE)
-    for i = 0, (#BANDS + 1) * TILE - 1 do tiles[i] = 0xFFFF end
-    for i, f in ipairs(order) do
-        local p = i - 1
-        local j = math.floor(p / 2) + (p % 2) * math.ceil(n / 2)
-        f.gray = n == 1 and 60 or 30 + 140 * j / (n - 1)
+    local tiles = ffi.new("uint16_t[?]", (#PATTERNS + 1) * TILE)
+    for i = 0, (#PATTERNS + 1) * TILE - 1 do tiles[i] = 0xFFFF end
+    for rank, f in ipairs(order) do
+        f.gray = n == 1 and 60 or 30 + 140 * (rank - 1) / (n - 1)
         f.off = math.min(220, f.gray + 70)
-        f.pattern = PATTERNS[i]
-        on_g[f.band], off_g[f.band] = f.gray, f.off
+        f.pattern = PATTERNS[rank]
+        on_g[f.id], off_g[f.id] = f.gray, f.off
         for y = 0, TILE - 1 do
             local bits = 0
             for x = 0, TILE - 1 do
                 if f.pattern(x, y) then bits = bor(bits, lshift(1, x)) end
             end
-            tiles[f.band * TILE + y] = bits
+            tiles[f.id * TILE + y] = bits
         end
     end
     local on = ffi.new("uint8_t[?]", LUT_SIZE)
     local off = ffi.new("uint8_t[?]", LUT_SIZE)
     for i = 0, LUT_SIZE - 1 do
-        local lum, g = base_lum[i], on_g[base_band[i]]
+        local lum, g = base_lum[i], on_g[assign[i]]
         if g then
             local w = math.min(1, math.max(0, (base_chroma[i] - 25) / 50))
             on[i] = math.floor(lum * (1 - w) + g * w + 0.5)
-            off[i] = math.floor(lum * (1 - w) + off_g[base_band[i]] * w + 0.5)
+            off[i] = math.floor(lum * (1 - w) + off_g[assign[i]] * w + 0.5)
         else
             on[i], off[i] = lum, lum
         end
     end
-    return { on = on, off = off, tiles = tiles }
+    return { on = on, off = off, tiles = tiles, assign = assign }
 end
 
 local function applyAllMode(src, m, bgr)
@@ -203,14 +211,14 @@ local function applyAllMode(src, m, bgr)
     local ddata = ffi.cast("uint8_t*", dst.data)
     local sps = src.pixel_stride
     local dstride = tonumber(dst.stride)
-    local on, off, tiles = m.on, m.off, m.tiles
+    local on, off, tiles, assign = m.on, m.off, m.tiles, m.assign
     for y = 0, h - 1 do
         local srow = sdata + y * sps
         local drow = ddata + y * dstride
         local ty = y % TILE
         for x = 0, w - 1 do
             local i = rgbIndex(srow[x], bgr)
-            local bits = tiles[base_band[i] * TILE + ty]
+            local bits = tiles[assign[i] * TILE + ty]
             drow[x] = band(rshift(bits, x % TILE), 1) == 1 and on[i] or off[i]
         end
     end
@@ -247,33 +255,98 @@ local function applyLut(src, lut, bgr)
     return dst
 end
 
--- Returns the bands present on the page, most common first, as { band, share }.
--- Tiny counts are anti-aliasing fringes between other colors, not real series.
-local function presentBands(src, bgr)
+-- Returns the distinct colors on the page, in hue then lightness order, as
+-- { id, r, g, b, lum, band, name, share }, plus `assign`, mapping each 6-bit RGB
+-- index to the id of its color (0 for neutral or unmatched colors).
+-- Colors are peaks of the page's color histogram rather than fixed hue bands, so
+-- shades of one hue (e.g. a sequential colormap) still come out as separate colors.
+-- Tiny counts are gradients and scattered pixels, not real series.
+local function findColors(src, bgr)
     buildBase()
-    local counts = ffi.new("uint32_t[?]", #BANDS + 1)
+    local counts = ffi.new("uint32_t[?]", LUT_SIZE)
+    local flat = ffi.new("uint32_t[?]", LUT_SIZE)
     local sdata = ffi.cast("ColorRGB32*", src.data)
     local sps = src.pixel_stride
+    local w = src:getWidth()
+    local prev = ffi.new("uint32_t[?]", w)
+    local cur = ffi.new("uint32_t[?]", w)
     for y = 0, src:getHeight() - 1 do
         local srow = sdata + y * sps
-        for x = 0, src:getWidth() - 1 do
+        for x = 0, w - 1 do
             local i = rgbIndex(srow[x], bgr)
-            if base_chroma[i] >= CHROMA_MIN then
-                counts[base_band[i]] = counts[base_band[i]] + 1
+            cur[x] = i
+            if base_chroma[i] >= CHROMA_MIN then counts[i] = counts[i] + 1 end
+        end
+        if y > 0 then
+            for x = 0, w - 2 do
+                local i = prev[x]
+                if i == prev[x + 1] and i == cur[x] then flat[i] = flat[i] + 1 end
             end
         end
+        prev, cur = cur, prev
     end
-    local colored = 0
-    for k = 1, #BANDS do colored = colored + counts[k] end
-    local found = {}
-    for k = 1, #BANDS do
-        local c = counts[k]
-        if c >= 500 and c >= colored * 0.01 then
-            table.insert(found, { band = k, share = c / colored })
+    local bins, colored = {}, 0
+    for i = 0, LUT_SIZE - 1 do
+        if counts[i] > 0 then
+            table.insert(bins, i)
+            colored = colored + counts[i]
         end
     end
-    table.sort(found, function(a, b) return a.share > b.share end)
-    return found
+
+    -- Peaks are picked among flat pixels (same color as their right and lower
+    -- neighbours): anti-aliasing fringes of text and lines never are, and near
+    -- shades of a colormap can't be told apart from them by color alone.
+    table.sort(bins, function(a, b) return flat[a] > flat[b] end)
+    local peaks = {}
+    for __, i in ipairs(bins) do
+        if flat[i] < 50 or #peaks == 16 then break end
+        local r, g, b = rgbOf(i)
+        local __, d = nearest(peaks, r, g, b)
+        if d > MERGE_DIST * MERGE_DIST then
+            table.insert(peaks, { r = r, g = g, b = b, count = 0 })
+        end
+    end
+    for __, i in ipairs(bins) do
+        local k, d = nearest(peaks, rgbOf(i))
+        if d <= ASSIGN_DIST * ASSIGN_DIST then peaks[k].count = peaks[k].count + counts[i] end
+    end
+    local found = {}
+    for __, p in ipairs(peaks) do
+        if p.count >= 500 and p.count >= colored * 0.01 then table.insert(found, p) end
+    end
+    table.sort(found, function(a, b) return a.count > b.count end)
+    for k = #found, #PATTERNS + 1, -1 do found[k] = nil end
+
+    -- Listed in hue order, shades of the same hue numbered from darkest to lightest.
+    local per_band, seen = {}, {}
+    for __, f in ipairs(found) do
+        local lum, __, bnd = classify(f.r, f.g, f.b)
+        f.lum, f.band = lum, bnd
+        per_band[f.band] = (per_band[f.band] or 0) + 1
+    end
+    table.sort(found, function(a, b)
+        if a.band ~= b.band then return a.band < b.band end
+        return a.lum < b.lum
+    end)
+    for k, f in ipairs(found) do
+        f.id, f.count = k, 0
+        f.name = BANDS[f.band].name
+        if per_band[f.band] > 1 then
+            seen[f.band] = (seen[f.band] or 0) + 1
+            f.name = f.name .. " " .. seen[f.band]
+        end
+    end
+
+    local assign = ffi.new("uint8_t[?]", LUT_SIZE)
+    for __, i in ipairs(bins) do
+        local k, d = nearest(found, rgbOf(i))
+        if k and d <= ASSIGN_DIST * ASSIGN_DIST then
+            assign[i] = k
+            found[k].count = found[k].count + counts[i]
+        end
+    end
+    for __, f in ipairs(found) do f.share = f.count / colored end
+    return found, assign
 end
 
 -- Image viewer with a mode selector at the bottom instead of tap-to-cycle.
@@ -327,7 +400,7 @@ function ModeViewer:buildLegend(width)
                 },
                 HorizontalSpan:new{ width = pad },
                 TextWidget:new{
-                    text = BANDS[f.band].name,
+                    text = f.name,
                     face = face,
                     max_width = cell_w - sw - 3 * pad,
                 },
@@ -380,7 +453,7 @@ end
 -- Takes ownership of src, a TYPE_BBRGB32 render.
 local function showModes(src)
     local bgr = require("ffi/mupdf").bgr and true or false
-    local found = presentBands(src, bgr)
+    local found, assign = findColors(src, bgr)
     if #found == 0 then
         src:free()
         UIManager:show(InfoMessage:new{ text = _("No colors found.") })
@@ -393,11 +466,11 @@ local function showModes(src)
     }
     local titles = { _("All colors → distinct grays and patterns") }
     local labels = { _("All") }
-    local all_mode = buildAllMode(found)
+    local all_mode = buildAllMode(found, assign)
     list[1] = function() return applyAllMode(src, all_mode, bgr) end
     for k, f in ipairs(found) do
-        local name = BANDS[f.band].name
-        list[k + 1] = function() return applyLut(src, getLut(f.band), bgr) end
+        local name = f.name
+        list[k + 1] = function() return applyLut(src, isolateLut(assign, k), bgr) end
         titles[k + 1] = string.format(_("%s  (%d%% of colored area)"), name, math.floor(f.share * 100 + 0.5))
         labels[k + 1] = name
     end
