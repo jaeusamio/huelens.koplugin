@@ -9,8 +9,10 @@ in an image viewer.
 
 ## Modes
 
-- **All**: every hue band (red, orange, yellow, green, cyan, blue, purple, magenta) is
-  mapped to a different gray level, with neighbouring hues getting distant grays.
+- **All**: every hue band present on the page (red, orange, yellow, green, cyan, blue,
+  purple, magenta) gets its own gray level, spread over the full range with
+  neighbouring hues getting distant grays, plus a fill pattern (solid, hatch, dots,
+  crosshatch...). A legend above the selector shows which pattern is which color.
 - **Single color**: one hue band is shown in black, other colors in light gray and
   neutral content (text, axes) faded. Only bands present on the page are offered,
   sorted by area.
