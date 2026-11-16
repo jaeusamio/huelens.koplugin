@@ -13,6 +13,7 @@ Normal page rendering is never modified: the color render is momentary.
 --]]--
 
 local Blitbuffer = require("ffi/blitbuffer")
+local ButtonTable = require("ui/widget/buttontable")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
@@ -376,6 +377,73 @@ function ModeViewer:onTap(_, ges)
     return true
 end
 
+-- Takes ownership of src, a TYPE_BBRGB32 render.
+local function showModes(src)
+    local bgr = require("ffi/mupdf").bgr and true or false
+    local found = presentBands(src, bgr)
+    if #found == 0 then
+        src:free()
+        UIManager:show(InfoMessage:new{ text = _("No colors found.") })
+        return
+    end
+
+    local list = {
+        image_disposable = true, -- each generated gray image is freed when replaced
+        free = function() src:free() end, -- free the RGB render on close
+    }
+    local titles = { _("All colors → distinct grays and patterns") }
+    local labels = { _("All") }
+    local all_mode = buildAllMode(found)
+    list[1] = function() return applyAllMode(src, all_mode, bgr) end
+    for k, f in ipairs(found) do
+        local name = BANDS[f.band].name
+        list[k + 1] = function() return applyLut(src, getLut(f.band), bgr) end
+        titles[k + 1] = string.format(_("%s  (%d%% of colored area)"), name, math.floor(f.share * 100 + 0.5))
+        labels[k + 1] = name
+    end
+
+    UIManager:show(ModeViewer:new{
+        image = list,
+        image_disposable = true, -- calls list:free() on close
+        images_keep_pan_and_zoom = true,
+        fullscreen = true,
+        with_title_bar = true,
+        title_text = titles[1],
+        titles = titles,
+        labels = labels,
+        legend_items = found,
+    })
+end
+
+-- Any image viewer showing a single color image gets a "Colors" button that opens
+-- it in the mode viewer. ImageViewer builds its button row inline in init, so we
+-- rebuild the ButtonTable with one more button. Guarded against double wrapping
+-- if this file is loaded again.
+if not ImageViewer._huelens_orig_init then
+    ImageViewer._huelens_orig_init = ImageViewer.init
+    function ImageViewer:init()
+        ImageViewer._huelens_orig_init(self)
+        if self._images_list or type(self.image) ~= "cdata"
+                or self.image:getType() ~= Blitbuffer.TYPE_BBRGB32 then
+            return
+        end
+        local rows = self.button_table.buttons
+        table.insert(rows[1], #rows[1], {
+            text = _("Colors"),
+            callback = function() showModes(self.image:copy()) end,
+        })
+        self.button_table:free()
+        self.button_table = ButtonTable:new{
+            width = self.width - 2 * self.button_padding,
+            buttons = rows,
+            zero_sep = true,
+            show_parent = self,
+        }
+        self.button_container[1] = self.button_table
+        self:update()
+    end
+end
+
 local HueLens = WidgetContainer:extend{
     name = "huelens",
     is_doc_only = true,
@@ -477,40 +545,7 @@ function HueLens:show()
         return true
     end
 
-    local bgr = require("ffi/mupdf").bgr and true or false
-    local found = presentBands(src, bgr)
-    if #found == 0 then
-        src:free()
-        UIManager:show(InfoMessage:new{ text = _("No colors found on this page.") })
-        return true
-    end
-
-    local list = {
-        image_disposable = true, -- each generated gray image is freed when replaced
-        free = function() src:free() end, -- free the RGB render on close
-    }
-    local titles = { _("All colors → distinct grays and patterns") }
-    local labels = { _("All") }
-    local all_mode = buildAllMode(found)
-    list[1] = function() return applyAllMode(src, all_mode, bgr) end
-    for k, f in ipairs(found) do
-        local name = BANDS[f.band].name
-        list[k + 1] = function() return applyLut(src, getLut(f.band), bgr) end
-        titles[k + 1] = string.format(_("%s  (%d%% of colored area)"), name, math.floor(f.share * 100 + 0.5))
-        labels[k + 1] = name
-    end
-
-    UIManager:show(ModeViewer:new{
-        image = list,
-        image_disposable = true, -- calls list:free() on close
-        images_keep_pan_and_zoom = true,
-        fullscreen = true,
-        with_title_bar = true,
-        title_text = titles[1],
-        titles = titles,
-        labels = labels,
-        legend_items = found,
-    })
+    showModes(src)
     return true
 end
 

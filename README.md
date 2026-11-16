@@ -38,6 +38,9 @@ With a paged document (PDF, CBZ, ...) open, use any of:
 
 Requires a document backend that supports color rendering (MuPDF).
 
+Any image viewer showing a color image (for example a figure opened by another
+plugin) also gets a **Colors** button that opens it in the same viewer.
+
 ## Releasing
 
 Push a `v*` tag pointing to a commit on `main`:
