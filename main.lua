@@ -496,14 +496,18 @@ if not ImageViewer._huelens_orig_init then
     ImageViewer._huelens_orig_init = ImageViewer.init
     function ImageViewer:init()
         ImageViewer._huelens_orig_init(self)
-        if self._images_list or type(self.image) ~= "cdata"
-                or self.image:getType() ~= Blitbuffer.TYPE_BBRGB32 then
-            return
-        end
+        if self._images_list or type(self.image) ~= "cdata" then return end
+        local bbtype = self.image:getType()
+        if bbtype ~= Blitbuffer.TYPE_BBRGB32 and bbtype ~= Blitbuffer.TYPE_BBRGB24 then return end
         local rows = self.button_table.buttons
         table.insert(rows[1], #rows[1], {
             text = _("Colors"),
-            callback = function() showModes(self.image:copy()) end,
+            callback = function()
+                local img = self.image
+                local src = Blitbuffer.new(img:getWidth(), img:getHeight(), Blitbuffer.TYPE_BBRGB32)
+                src:blitFrom(img, 0, 0, 0, 0, img:getWidth(), img:getHeight())
+                showModes(src)
+            end,
         })
         self.button_table:free()
         self.button_table = ButtonTable:new{
@@ -514,6 +518,40 @@ if not ImageViewer._huelens_orig_init then
         }
         self.button_container[1] = self.button_table
         self:update()
+    end
+end
+
+-- On grayscale devices images are decoded to gray, losing the colors before the
+-- viewer gets them. Decode images opened from the book in color.
+local CreDocument = require("document/credocument")
+if not CreDocument._huelens_orig_getImage then
+    CreDocument._huelens_orig_getImage = CreDocument.getImageFromPosition
+    function CreDocument:getImageFromPosition(...)
+        local orig = Device.hasColorScreen
+        Device.hasColorScreen = function() return true end
+        local ok, img = pcall(CreDocument._huelens_orig_getImage, self, ...)
+        Device.hasColorScreen = orig
+        if not ok then error(img) end
+        return img
+    end
+end
+
+-- Same for panel zoom in paged documents: render the crop in color.
+local Document = require("document/document")
+if not Document._huelens_orig_drawPagePart then
+    Document._huelens_orig_drawPagePart = Document.drawPagePart
+    function Document:drawPagePart(...)
+        local mudoc = self._document
+        if self.render_color or not (mudoc and mudoc.setColorRendering) then
+            return Document._huelens_orig_drawPagePart(self, ...)
+        end
+        self.render_color = true
+        mudoc:setColorRendering(true)
+        local ok, bb, rotate = pcall(Document._huelens_orig_drawPagePart, self, ...)
+        self.render_color = false
+        mudoc:setColorRendering(false)
+        if not ok then error(bb) end
+        return bb, rotate
     end
 end
 
